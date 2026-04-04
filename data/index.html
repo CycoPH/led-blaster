@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+	<title>LED BLASTER</title>
+	<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+	<style>
+				body {
+		    font-family: sans-serif;
+			text-align: center;
+			background-color: #1a1a1a;
+			color: white;
+			margin: 0;
+			padding: 10px;
+			user-select: none;
+			touch-action: manipulation;
+		}
+
+		.card {
+			background-color: #2d2d2d;
+			padding: 15px;
+			border-radius: 12px;
+			margin-bottom: 10px;
+		}
+
+		.stats {
+			display: flex;
+			justify-content: space-around;
+			font-size: 1.2rem;
+			font-weight: bold;
+		}
+
+		.val {
+			color: #0f0;
+		}
+
+		.combo-box {
+			color: #ffeb3b;
+			font-size: 0.9rem;
+			margin-top: 5px;
+		}
+
+		#strip-container {
+			display: flex;
+			flex-wrap: wrap;
+			justify-content: center;
+			gap: 4px;
+			background: #000;
+			border: 1px solid #444;
+			margin: 15px 0;
+			padding: 10px;
+			border-radius: 8px;
+		}
+
+		.led {
+			width: 6px;
+			height: 6px;
+			background-color: #000;
+		}
+
+		.powerups {
+			display: flex;
+			justify-content: center;
+			gap: 15px;
+			margin-bottom: 10px;
+		}
+
+		.pup {
+			width: 35px;
+			height: 35px;
+			border-radius: 50%;
+			opacity: 0.1;
+			border: 2px solid #444;
+			transition: all 0.2s;
+		}
+
+		.pup.active {
+			opacity: 1;
+			box-shadow: 0 0 15px currentColor;
+			border-color: #fff;
+			transform: scale(1.1);
+		}
+
+		#pup-r {
+			background: #ff0000;
+			color: #ff0000;
+		}
+
+		#pup-g {
+			background: #00ff00;
+			color: #00ff00;
+		}
+
+		#pup-b {
+			background: #0000ff;
+			color: #0000ff;
+		}
+
+		.btn-grid {
+			display: grid;
+			grid-template-columns: 1fr 1fr 1fr;
+			gap: 8px;
+			max-width: 500px;
+			margin: 0 auto;
+		}
+
+		.btn {
+			border: none;
+			border-radius: 8px;
+			font-size: 1.2rem;
+			font-weight: bold;
+			color: white;
+			height: 90px;
+			-webkit-tap-highlight-color: transparent;
+		}
+
+		.btn-r {
+			background: #c62828;
+		}
+
+		.btn-g {
+			background: #2e7d32;
+		}
+
+		.btn-b {
+			background: #1565c0;
+		}
+
+		.btn:active {
+			filter: brightness(1.3);
+			transform: scale(0.97);
+		}
+
+		.sub-controls {
+			display: flex;
+			gap: 8px;
+			justify-content: center;
+			margin-top: 15px;
+		}
+
+		.btn-c {
+			background: #424242;
+			padding: 15px;
+			flex: 1;
+			border: none;
+			border-radius: 6px;
+			color: #fff;
+			font-weight: bold;
+		}
+
+		.btn-c:disabled {
+			opacity: 0.35;
+			cursor: default;
+		}
+
+		#btn-freeze.ready {
+			background: #1a3a5c;
+			border: 1px solid #4fc3f7;
+			color: #4fc3f7;
+			box-shadow: 0 0 8px #4fc3f7;
+		}
+
+
+	</style>
+</head>
+
+<body>
+	<div class="card">
+		<div class="stats">
+			<div>LVL <span class="val" id="level">1</span></div>
+			<div>PTS <span class="val" id="score">0</span></div>
+			<div style="font-size:0.9rem;">HI <span class="val" id="hiscore">0</span></div>
+			<div style="font-size:0.9rem;">ACC <span class="val" id="accuracy">-</span></div>
+		</div>
+		<div style="font-size:0.8rem;margin-top:4px;color:#888;">
+			HI SURV <span class="val" id="hi-survival">0</span>
+			&nbsp;|&nbsp;
+			MAX COMBO <span class="val" id="max-combo">1</span>
+		</div>
+		<div style="display:flex;justify-content:space-between;align-items:center;margin-top:3px;">
+			<div class="combo-box" style="margin:0;">COMBO x<span id="combo">1</span></div>
+			<div id="lives-display" style="font-size:1.3rem;letter-spacing:4px;"></div>
+		</div>
+		<div id="boss-alert" style="color:#ff6600;font-size:0.95rem;font-weight:bold;margin-top:4px;display:none;">[ BOSS LEVEL ]</div>
+		<div id="survival-alert" style="color:#ffd700;font-size:0.95rem;font-weight:bold;margin-top:2px;display:none;">[ &#x221E; SURVIVAL MODE ]</div>
+		<div style="height:5px;background:#333;border-radius:3px;margin:5px 0;overflow:hidden;">
+			<div id="timer-bar" style="height:100%;width:0%;background:#4caf50;border-radius:3px;transition:width 0.1s linear;"></div>
+		</div>
+		<div id="strip-container"></div>
+		<div class="powerups">
+			<div id="pup-r" class="pup"></div>
+			<div id="pup-g" class="pup"></div>
+			<div id="pup-b" class="pup"></div>
+		</div>
+	</div>
+
+	<div class="btn-grid">
+		<button class="btn btn-r" id="btn-r">RED</button>
+		<button class="btn btn-g" id="btn-g">GRN</button>
+		<button class="btn btn-b" id="btn-b">BLU</button>
+	</div>
+
+	<div class="sub-controls">
+		<button class="btn-c" onclick="send('RESET')">RESTART</button>
+		<button class="btn-c" onclick="send('LEVELUP')">LEVEL UP</button>
+		<button class="btn-c" onclick="send('GAMETYPE')">GAME TYPE</button>
+	</div>
+	<div class="sub-controls" style="margin-top:6px;">
+		<button class="btn-c" id="btn-freeze" onclick="send('FREEZE')" disabled>❄ FREEZE</button>
+		<button class="btn-c" onclick="send('SURVIVAL')">∞ SURVIVAL</button>
+	</div>
+	<div>V1.2026.03.08-1</div>
+
+	<script>
+		// --- WEBSOCKET & GAME LOGIC ---
+		const container = document.getElementById('strip-container');
+		let leds = [];
+		let activeLedCount = 0;
+		let lastScore = 0;
+		let lastLevel = 1;
+
+		function buildStrip(count) {
+			if (count === activeLedCount) return;
+			activeLedCount = count;
+			container.innerHTML = '';
+			leds = [];
+			for (let i = 0; i < count; i++) {
+				const d = document.createElement('div');
+				d.className = 'led';
+				container.appendChild(d);
+				leds.push(d);
+			}
+		}
+
+		buildStrip(120);
+
+		var ws = new WebSocket(`ws://${window.location.hostname}/ws`);
+		ws.binaryType = "arraybuffer";
+
+		ws.onmessage = function (e) {
+			if (typeof e.data === "string") {
+				var data = JSON.parse(e.data);
+
+				lastScore = data.score;
+				lastLevel = data.level;
+
+				if (data.leds) buildStrip(data.leds);
+
+				document.getElementById('score').innerText = data.score;
+				document.getElementById('level').innerText = data.level;
+				document.getElementById('combo').innerText = data.combo;
+				document.getElementById('pup-r').classList.toggle('active', data.p_r);
+				document.getElementById('pup-g').classList.toggle('active', data.p_g);
+				document.getElementById('pup-b').classList.toggle('active', data.p_b);
+				document.getElementById('boss-alert').style.display = data.boss ? 'block' : 'none';
+				document.getElementById('survival-alert').style.display = data.survival ? 'block' : 'none';
+				if (data.survival) document.getElementById('level').innerText = '\u221e';
+				document.getElementById('hiscore').innerText = data.hi || 0;
+				document.getElementById('hi-survival').innerText = data.hi_survival || 0;
+				document.getElementById('max-combo').innerText = data.max_combo || 1;
+				document.getElementById('accuracy').innerText = data.accuracy !== undefined ? data.accuracy + '%' : '-';
+				const freezeBtn = document.getElementById('btn-freeze');
+				if (freezeBtn) {
+					const fa = !!data.freeze_ok;
+					freezeBtn.disabled = !fa;
+					freezeBtn.classList.toggle('ready', fa);
+				}
+				if (data.lives !== undefined) {
+					let h = '';
+					for (let i = 0; i < 3; i++) h += `<span style="color:${i < data.lives ? '#f44' : '#444'}">&#9829;</span>`;
+					document.getElementById('lives-display').innerHTML = h;
+				}
+				const pct = data.time_pct !== undefined ? data.time_pct : 0;
+				const tb = document.getElementById('timer-bar');
+				tb.style.width = pct + '%';
+				tb.style.background = pct > 50 ? '#4caf50' : pct > 20 ? '#ffeb3b' : '#f44336';
+			} else {
+				const view = new Uint8Array(e.data);
+				const count = Math.floor(view.byteLength / 3);
+				if (count !== activeLedCount) buildStrip(count);
+				for (let i = 0; i < count; i++) {
+					leds[i].style.backgroundColor = `rgb(${view[i * 3]},${view[i * 3 + 1]},${view[i * 3 + 2]})`;
+				}
+			}
+		};
+
+		function send(m) {
+			ws.send(m);
+		}
+
+		// --- BUTTON HANDLING ---
+		function attachButton(id, colorCode) {
+			const btn = document.getElementById(id);
+			let startTime = 0;
+			let sent = false;
+
+			const start = (e) => {
+				if (e.cancelable) e.preventDefault();
+				startTime = Date.now();
+				sent = false;
+			};
+
+			const end = (e) => {
+				if (e.cancelable) e.preventDefault();
+				if (startTime > 0 && !sent) {
+					const dur = Date.now() - startTime;
+					const type = dur > 300 ? 'LONG' : 'SHORT';
+					send(`BTN_${colorCode}_${type}`);
+					sent = true;
+					startTime = 0;
+				}
+			};
+
+			btn.addEventListener('mousedown', start);
+			btn.addEventListener('mouseup', end);
+			btn.addEventListener('touchstart', start);
+			btn.addEventListener('touchend', end);
+		}
+
+		attachButton('btn-r', 'R');
+		attachButton('btn-g', 'G');
+		attachButton('btn-b', 'B');
+	</script>
+</body>
+
+</html>

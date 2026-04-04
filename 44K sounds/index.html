@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+	<title>LED BLASTER</title>
+	<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+	<style>
+		body {
+			font-family: sans-serif;
+			text-align: center;
+			background-color: #1a1a1a;
+			color: white;
+			margin: 0;
+			padding: 10px;
+			user-select: none;
+			touch-action: manipulation;
+		}
+
+		.card {
+			background-color: #2d2d2d;
+			padding: 15px;
+			border-radius: 12px;
+			margin-bottom: 10px;
+		}
+
+		.stats {
+			display: flex;
+			justify-content: space-around;
+			font-size: 1.2rem;
+			font-weight: bold;
+		}
+
+		.val {
+			color: #0f0;
+		}
+
+		.combo-box {
+			color: #ffeb3b;
+			font-size: 0.9rem;
+			margin-top: 5px;
+		}
+
+		#strip-container {
+			display: flex;
+			flex-wrap: wrap;
+			justify-content: center;
+			gap: 4px;
+			background: #000;
+			border: 1px solid #444;
+			margin: 15px 0;
+			padding: 10px;
+			border-radius: 8px;
+		}
+
+		.led {
+			width: 6px;
+			height: 6px;
+			background-color: #000;
+		}
+
+		.powerups {
+			display: flex;
+			justify-content: center;
+			gap: 15px;
+			margin-bottom: 10px;
+		}
+
+		.pup {
+			width: 35px;
+			height: 35px;
+			border-radius: 50%;
+			opacity: 0.1;
+			border: 2px solid #444;
+			transition: all 0.2s;
+		}
+
+		.pup.active {
+			opacity: 1;
+			box-shadow: 0 0 15px currentColor;
+			border-color: #fff;
+			transform: scale(1.1);
+		}
+
+		#pup-r {
+			background: #ff0000;
+			color: #ff0000;
+		}
+
+		#pup-g {
+			background: #00ff00;
+			color: #00ff00;
+		}
+
+		#pup-b {
+			background: #0000ff;
+			color: #0000ff;
+		}
+
+		.btn-grid {
+			display: grid;
+			grid-template-columns: 1fr 1fr 1fr;
+			gap: 8px;
+			max-width: 500px;
+			margin: 0 auto;
+		}
+
+		.btn {
+			border: none;
+			border-radius: 8px;
+			font-size: 1.2rem;
+			font-weight: bold;
+			color: white;
+			height: 90px;
+			-webkit-tap-highlight-color: transparent;
+		}
+
+		.btn-r {
+			background: #c62828;
+		}
+
+		.btn-g {
+			background: #2e7d32;
+		}
+
+		.btn-b {
+			background: #1565c0;
+		}
+
+		.btn:active {
+			filter: brightness(1.3);
+			transform: scale(0.97);
+		}
+
+		.sub-controls {
+			display: flex;
+			gap: 8px;
+			justify-content: center;
+			margin-top: 15px;
+		}
+
+		.btn-c {
+			background: #424242;
+			padding: 15px;
+			flex: 1;
+			border: none;
+			border-radius: 6px;
+			color: #fff;
+			font-weight: bold;
+		}
+
+
+	</style>
+</head>
+
+<body>
+	<div class="card">
+		<div class="stats">
+			<div>LVL <span class="val" id="level">1</span></div>
+			<div>PTS <span class="val" id="score">0</span></div>
+		</div>
+		<div class="combo-box">COMBO x<span id="combo">1</span></div>
+		<div id="strip-container"></div>
+		<div class="powerups">
+			<div id="pup-r" class="pup"></div>
+			<div id="pup-g" class="pup"></div>
+			<div id="pup-b" class="pup"></div>
+		</div>
+	</div>
+
+	<div class="btn-grid">
+		<button class="btn btn-r" id="btn-r">RED</button>
+		<button class="btn btn-g" id="btn-g">GRN</button>
+		<button class="btn btn-b" id="btn-b">BLU</button>
+	</div>
+
+	<div class="sub-controls">
+		<button class="btn-c" onclick="send('RESET')">RESTART</button>
+		<button class="btn-c" onclick="send('LEVELUP')">LEVEL UP</button>
+	</div>
+	<div>V1.2026.03.08-1</div>
+
+	<script>
+		// --- WEBSOCKET & GAME LOGIC ---
+		const container = document.getElementById('strip-container');
+		const leds = [];
+		let lastScore = 0;
+		let lastLevel = 1;
+
+		for (let i = 0; i < 120; i++) {
+			const d = document.createElement('div');
+			d.className = 'led';
+			container.appendChild(d);
+			leds.push(d);
+		}
+
+		var ws = new WebSocket(`ws://${window.location.hostname}/ws`);
+		ws.binaryType = "arraybuffer";
+
+		ws.onmessage = function (e) {
+			if (typeof e.data === "string") {
+				var data = JSON.parse(e.data);
+
+				lastScore = data.score;
+				lastLevel = data.level;
+
+				document.getElementById('score').innerText = data.score;
+				document.getElementById('level').innerText = data.level;
+				document.getElementById('combo').innerText = data.combo;
+				document.getElementById('pup-r').classList.toggle('active', data.p_r);
+				document.getElementById('pup-g').classList.toggle('active', data.p_g);
+				document.getElementById('pup-b').classList.toggle('active', data.p_b);
+			} else {
+				const view = new Uint8Array(e.data);
+				for (let i = 0; i < 120; i++) {
+					leds[i].style.backgroundColor = `rgb(${view[i * 3]},${view[i * 3 + 1]},${view[i * 3 + 2]})`;
+					/*
+					if(view[i*3] > 0 || view[i*3+1] > 0 || view[i*3+2] > 0) {
+					   leds[i].style.boxShadow = `0 0 4px rgb(${view[i*3]},${view[i*3+1]},${view[i*3+2]})`;
+					   leds[i].style.borderColor = "#fff";
+					} else {
+					   leds[i].style.boxShadow = "none";
+					   leds[i].style.borderColor = "#333";
+					}
+					*/
+				}
+			}
+		};
+
+		function send(m) {
+			ws.send(m);
+		}
+
+		// --- BUTTON HANDLING ---
+		function attachButton(id, colorCode) {
+			const btn = document.getElementById(id);
+			let startTime = 0;
+			let sent = false;
+
+			const start = (e) => {
+				if (e.cancelable) e.preventDefault();
+				startTime = Date.now();
+				sent = false;
+			};
+
+			const end = (e) => {
+				if (e.cancelable) e.preventDefault();
+				if (startTime > 0 && !sent) {
+					const dur = Date.now() - startTime;
+					const type = dur > 300 ? 'LONG' : 'SHORT';
+					send(`BTN_${colorCode}_${type}`);
+					sent = true;
+					startTime = 0;
+				}
+			};
+
+			btn.addEventListener('mousedown', start);
+			btn.addEventListener('mouseup', end);
+			btn.addEventListener('touchstart', start);
+			btn.addEventListener('touchend', end);
+		}
+
+		attachButton('btn-r', 'R');
+		attachButton('btn-g', 'G');
+		attachButton('btn-b', 'B');
+	</script>
+</body>
+
+</html>
