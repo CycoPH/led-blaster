@@ -118,6 +118,27 @@ bool updateWsLeds = false; // Flag to indicate when to send LED state updates to
 bool updateWsInfo = false;  // Flag to indicate when to send game info updates to clients (score, level, multiplier, etc)
 
 // --- CUSTOM MIXER CLASS ---
+//
+// WavMixer — the game's sound engine, all in one tidy class.
+//
+// A real arcade machine has lots of sounds playing at once — the pew of a laser,
+// the crunch of a hit, a power-up jingle — all at the same time.  Mixing means adding
+// several audio streams together so you hear them all through one speaker.
+//
+// Each "channel" is just a slot holding a pointer to a block of raw audio samples
+// (the numbers that describe the sound wave).  The readBytes() method is called many
+// times a second by the audio driver; it sums every active channel into one output
+// buffer, clipping the result so it never exceeds the 16-bit integer limit and causes
+// ugly distortion.
+//
+// To avoid reading the same file from flash storage every time a sound plays, the four
+// most-used sounds are *preloaded* into RAM at startup (cached).  The less-frequent
+// win/win_game sounds are loaded on demand and freed when finished.
+//
+// Interesting reading:
+//   Digital audio fundamentals — https://www.soundonsound.com/techniques/digital-audio-basics
+//   How WAV files work       — https://docs.fileformat.com/audio/wav/
+//   I2S (the wire protocol)  — https://www.electronicshub.org/i2s-protocol/
 #define MAX_AUDIO_CHANNELS 4
 class WavMixer : public AudioStream 
 {
@@ -170,6 +191,8 @@ public:
         releaseCache();
     }
 
+    // releaseCache() — free all sounds that were loaded into RAM.
+    // Called before a fresh preload so we don't keep paying for memory we no longer need.
     void releaseCache()
     {
         for (int i = 0; i < CACHED_SOUND_COUNT; i++)
@@ -184,6 +207,15 @@ public:
         }
     }
 
+    // loadWavToBuffer() — read a WAV file from flash into a freshly allocated block of RAM.
+    //
+    // WAV files start with a 44-byte header describing sample rate, bit depth, etc.
+    // Everything after byte 44 is raw PCM audio — just a big list of 16-bit signed integers,
+    // one per sample, at 22 050 samples per second (CD quality is 44 100, so this is half-speed
+    // to save space on the tiny 4 MB SPIFFS flash).
+    //
+    // Returns true and fills outSamples/outSampleCount on success; returns false on any error
+    // so callers know not to try playing a nullptr.
     bool loadWavToBuffer(const char *path, int16_t *&outSamples, size_t &outSampleCount)
     {
         outSamples = nullptr;
@@ -242,6 +274,12 @@ public:
         return true;
     }
 
+    // preloadAll() — load the four most-used sounds into RAM at startup.
+    //
+    // Reading a file from SPI flash while the game is already running would cause
+    // glitches — the CPU has to stop and wait.  Loading everything up-front into
+    // regular RAM means play() never touches the filesystem mid-game, so audio is
+    // always glitch-free.  Think of it like buffering a YouTube video before pressing play.
     void preloadAll()
     {
         releaseCache();
@@ -323,6 +361,20 @@ public:
         return nullptr;
     }
 
+    // readBytes() — the heart of the mixer; called automatically by the audio driver.
+    //
+    // Every ~23 ms the I2S driver asks for a fresh buffer of audio data.  This method
+    // loops through every active channel, reading its samples and *adding* them to the
+    // output buffer.  Adding is how mixing works — the waves combine mathematically
+    // just like two ripples on a pond adding together.
+    //
+    // The int32_t intermediate prevents overflow: two 16-bit values added together can
+    // exceed 16 bits, so we clamp (clip) the result back into the valid range before
+    // writing it out.  Without this you'd hear ugly crackling distortion on overlapping
+    // sounds.
+    //
+    // Interesting reading:
+    //   How digital mixing works — https://www.izotope.com/en/learn/digital-audio-basics.html
     size_t readBytes(uint8_t *data, size_t len) override 
     {
         // Clear out the buffer before mixing
@@ -375,6 +427,14 @@ public:
         return len;
     }
 
+    // play() — start playing a sound effect.
+    //
+    // Checks the cache first; if found, points a free channel at those samples and sets
+    // it active.  If ALL channels are busy (four sounds already playing) the new sound is
+    // silently dropped — better to miss an effect than to stomp on another channel's data.
+    //
+    // The win/win_game clips are loaded on demand because they're too long and infrequent
+    // to justify keeping in RAM the whole time.
     void play(const char *filename) 
     {
         const CachedSound *sound = findCached(filename);
@@ -432,6 +492,11 @@ public:
         return 0; 
     }
     
+    // available() — tell the audio driver how many bytes of data are ready to be read.
+    //
+    // StreamCopy (from the AudioTools library) calls available() before calling readBytes().
+    // If we returned 0 it would stop pumping the I2S stream.  Returning the largest
+    // remaining channel size keeps the stream flowing until all sounds have finished.
     int available() override 
     { 
         // StreamCopy relies on available() to decide if it should read.
@@ -587,6 +652,7 @@ void triggerShoot(CRGB color, bool isSuper);
 void gameLoop(); 
 void startGameRound(); 
 void playSound(const char *filename);
+bool isPositionOccupied(int pos);
 void addEnemyAtFront(int pos, CRGB col); 
 void drawGame();
 int countActiveEnemies(); 
@@ -604,6 +670,19 @@ void loseLife();
 void loadSurvivalHighScore();
 void saveSurvivalHighScore();
 
+// safeFastLEDShow() — send the current LED colour data to the physical strip.
+//
+// FastLED.show() translates the leds[] array into a precisely-timed stream of pulses
+// on the data wire.  WS2812B LEDs use a 1-wire protocol where a "1" bit and a "0" bit
+// are distinguished purely by pulse width — impressive that the chip decodes it!
+//
+// On some microcontrollers you must disable interrupts while sending to avoid timing
+// glitches, but the ESP32's RMT (Remote Control) peripheral handles timing in hardware,
+// so we can just call FastLED.show() directly.
+//
+// Interesting reading:
+//   WS2812B datasheet & protocol — https://cdn-shop.adafruit.com/datasheets/WS2812B.pdf
+//   FastLED library home          — https://fastled.io
 // Interrupt-safe FastLED.show() wrapper
 inline void safeFastLEDShow() {
     // On ESP32/RMT, disabling global interrupts during show can cause worse timing artifacts.
@@ -611,6 +690,31 @@ inline void safeFastLEDShow() {
 }
 
 // ================= SETUP =================
+//
+// setup() — runs exactly once when the ESP32 powers on or resets.
+//
+// Think of this as the game cartridge loading: every system must be initialised in the
+// right order before the game loop can start.
+//
+//  1. Serial  — opens the USB debug console (like console.log in JavaScript).
+//  2. SPIFFS  — mounts the tiny filesystem stored in flash memory.  This is where the
+//               web page files, audio WAVs, and high-score JSON live.
+//               SPIFFS stands for Serial Peripheral Interface Flash File System.
+//  3. Status LEDs — three small SMD LEDs driven by PWM (Pulse Width Modulation);
+//               brightness is set by varying the duty cycle of a fast square wave.
+//  4. I2S audio — sets up the Inter-IC Sound bus that talks to the DAC/amplifier board.
+//  5. Sound queue — a FreeRTOS message queue so the game loop can request sounds without
+//               blocking; the audio task drains it on a different CPU core.
+//  6. FastLED — attaches to the LED data pin and records how many LEDs to drive.
+//  7. Wi-Fi AP — creates a hotspot so phones can connect and use the web UI.
+//  8. Web server — registers URL routes and starts listening on port 80.
+//  9. Audio task — spawns the audio processing task on CPU core 0 (the game runs on core 1).
+// 10. resetLevel  — puts the game into its initial state.
+//
+// Interesting reading:
+//   ESP32 dual-core architecture — https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-guides/freertos-smp.html
+//   FreeRTOS queues             — https://www.freertos.org/Embedded-RTOS-Queues.html
+//   PWM & duty cycle            — https://learn.sparkfun.com/tutorials/pulse-width-modulation
 void setup() 
 {
     Serial.begin(115200);
@@ -702,6 +806,24 @@ void setup()
 }
 
 // ================= AUDIO TASK (Core 0) =================
+//
+// audioTask() — the dedicated sound-processing task running on CPU core 0.
+//
+// The ESP32 is a *dual-core* processor — two independent CPUs sharing the same chip.
+// Running audio on its own core means the game logic (on core 1) can never stall the
+// sound, and the sound can never stall the rendering.  Both cores tick along at full
+// speed simultaneously.
+//
+// Each iteration:
+//   1. Drain every pending sound name out of the soundQueue and tell the WavMixer to start
+//      playing it.  Using a queue is the thread-safe way for core 1 to pass data to core 0.
+//   2. If any channel is still active, call copier.copy() to push audio samples to I2S.
+//   3. vTaskDelay(1) yields for 1 ms so the FreeRTOS scheduler can run Wi-Fi housekeeping
+//      tasks on the same core without starving.
+//
+// Interesting reading:
+//   FreeRTOS tasks & scheduling — https://www.freertos.org/taskandcr.html
+//   Producer-consumer queues   — https://en.wikipedia.org/wiki/Producer%E2%80%93consumer_problem
 void audioTask(void *parameter) 
 {
     const char *pendingSound = nullptr;
@@ -724,6 +846,22 @@ void audioTask(void *parameter)
 }
 
 // ================= MAIN LOOP (Core 1) =================
+//
+// loop() — Arduino's main loop, called repeatedly forever on CPU core 1.
+//
+// Every iteration (roughly 30+ times per second) it:
+//  1. Checks for serial commands typed in the debug console.
+//  2. Tells the WebSocket server to drop disconnected clients (housekeeping).
+//  3. Runs the game engine — the big processGameLogic() function.
+//  4. Updates the three physical status LEDs on the hardware.
+//
+// The loop itself has no delay; instead, each sub-function uses timestamps to decide
+// whether its own time slice has come.  This is called "cooperative non-blocking" design
+// and is how most embedded games avoid the dangers of blocking calls.
+//
+// Interesting reading:
+//   Arduino loop basics          — https://docs.arduino.cc/learn/programming/arduino-sketches
+//   Non-blocking timing patterns — https://www.arduino.cc/en/Tutorial/BuiltInExamples/BlinkWithoutDelay
 void loop() 
 {
     handleSerialDebugCommands();
@@ -732,6 +870,13 @@ void loop()
     updateStatusLeds();        // Update external hardware LEDs
 }
 
+// handleSerialDebugCommands() — a tiny cheat-code console for debugging.
+//
+// While the game runs you can open a serial monitor (e.g. in VS Code or Arduino IDE) at
+// 115 200 baud and type single characters.  Pressing 'a' dumps a snapshot of the audio
+// engine's state: how many channels are active, how many sounds have been requested and
+// played, how much RAM is used, and so on.  Invaluable for tracking down audio stutters
+// or queue overflows without needing to attach a debugger.
 void handleSerialDebugCommands()
 {
     while (Serial.available() > 0)
@@ -761,6 +906,26 @@ void handleSerialDebugCommands()
     }
 }
 
+// updateStatusLeds() — drive the three small RGB hardware LEDs on the controller.
+//
+// Each LED has three jobs depending on what the player is doing:
+//
+//  CHARGING  — while a button is held, the LED fades from dim (20) to full (255) over
+//              LONG_PRESS_MS milliseconds.  This gives the player visual feedback that
+//              they're charging a super shot.  The brightness is calculated with map(),
+//              which linearly maps one range of numbers onto another.
+//
+//  POWER-UP  — if a power-up of that colour is ready, the LED glows solid full brightness.
+//
+//  HIGH COMBO — if the multiplier is ≥ 2 and no power-up is held, the LED blinks at a
+//              speed that increases with the combo tier — a subtle but satisfying reward.
+//
+// The ESP32's LEDC peripheral (LED Control) generates the PWM signal in hardware so the
+// CPU does not have to bit-bang the pin.
+//
+// Interesting reading:
+//   ESP32 LEDC PWM — https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/peripherals/ledc.html
+//   map() function  — https://www.arduino.cc/reference/en/language/functions/math/map/
 void updateStatusLeds() 
 {
     unsigned long currentMillis = millis();
@@ -796,6 +961,15 @@ void updateStatusLeds()
     ledcWrite(PIN_STAT_B, computeDuty(chargingB, pressTimeB, hasPowerUpB));
 }
 
+// playSound() — the game's one-liner for requesting a sound effect.
+//
+// Rather than calling mixer.play() directly (which would touch audio state from the
+// game/network task on core 1 while the audio task on core 0 is reading it — a data
+// race), this function places the filename pointer into a thread-safe FreeRTOS queue.
+// The audio task picks it up and calls mixer.play() safely on its own core.
+//
+// xQueueSend(..., 0) is non-blocking (timeout=0).  If the queue is full the sound is
+// counted as dropped and skipped; the game never stalls waiting for audio.
 void playSound(const char *filename) 
 {
     if (soundQueue != NULL)
@@ -814,6 +988,11 @@ void playSound(const char *filename)
     }
 }
 
+// logAudioAssetStatus() — scan SPIFFS and print a health-check for every audio file.
+//
+// Called once at boot so you can immediately see in the serial console if any WAV is
+// missing or corrupt (zero-length).  A WAV file must be at least 45 bytes — 44 for the
+// standard RIFF header plus at least 1 byte of audio data.
 void logAudioAssetStatus()
 {
     const char *assets[] = {
@@ -855,6 +1034,16 @@ void logAudioAssetStatus()
     }
 }
 
+// loadHighScore() — read the all-time high score from a tiny JSON file in flash.
+//
+// Persistent storage on a microcontroller is tricky — there's no hard drive!
+// This game uses SPIFFS to store a one-key JSON document: {"hs": 1234}.
+// ArduinoJson parses it in a stack-allocated StaticJsonDocument (no heap needed).
+// If the file doesn't exist yet (first boot) the high score simply starts at 0.
+//
+// Interesting reading:
+//   ArduinoJson library — https://arduinojson.org/
+//   Persistent storage on ESP32 — https://randomnerdtutorials.com/esp32-flash-memory/
 void loadHighScore()
 {
     if (!SPIFFS.exists("/highscore.json")) { highScore = 0; return; }
@@ -869,6 +1058,11 @@ void loadHighScore()
     Serial.printf("[GAME] Loaded high score: %d\n", highScore);
 }
 
+// saveHighScore() — write the current high score back to flash storage.
+//
+// Opens highscore.json in write mode (creating it if absent), serialises the score
+// into JSON, and closes the file.  SPIFFS handles wear-levelling automatically so
+// repeated writes don't burn out the flash cells too quickly.
 void saveHighScore()
 {
     File f = SPIFFS.open("/highscore.json", "w");
@@ -880,6 +1074,9 @@ void saveHighScore()
     Serial.printf("[GAME] Saved high score: %d\n", highScore);
 }
 
+// checkHighScore() — compare the current score against the stored record and save if beaten.
+// Also sets the updateWsInfo flag so the new record is immediately broadcast to any
+// connected web clients — they'll see the trophy animation without needing to refresh.
 void checkHighScore()
 {
     if (score > highScore)
@@ -890,6 +1087,8 @@ void checkHighScore()
     }
 }
 
+// loadSurvivalHighScore() — same as loadHighScore() but for the endless survival mode.
+// Stored separately so classic-mode and survival-mode records don't overwrite each other.
 void loadSurvivalHighScore()
 {
     if (!SPIFFS.exists("/survival_hs.json")) { highScoreSurvival = 0; return; }
@@ -902,6 +1101,7 @@ void loadSurvivalHighScore()
     Serial.printf("[GAME] Loaded survival high score: %d\n", highScoreSurvival);
 }
 
+// saveSurvivalHighScore() — persist the survival-mode record to flash.
 void saveSurvivalHighScore()
 {
     File f = SPIFFS.open("/survival_hs.json", "w");
@@ -914,6 +1114,28 @@ void saveSurvivalHighScore()
 }
 
 // ================= GAME LOGIC =================
+//
+// processGameLogic() — the top-level game brain, called every iteration of loop().
+//
+// This is the state machine dispatcher.  A *state machine* is a design pattern where
+// a program can only be in one "state" at a time (e.g. SHOWING_LEVEL, PLAYING, GAME_OVER)
+// and transitions between them in response to events.  It's used everywhere from traffic
+// lights to video games to airplane autopilots.
+//
+// Each state gets its own branch:
+//   SHOWING_LEVEL — displays a countdown animation while waiting for the player to press
+//                   a button (or auto-starts after 3 s).
+//   PLAYING       — runs the full game engine via gameLoop().
+//   LEVEL_CLEARED — plays a comet celebration animation then advances the level.
+//   GAME_OVER     — shows a high-score visualisation; any button restarts.
+//   GAME_WON      — rainbow victory dance; player has beaten all 34 levels!
+//
+// At the end, WebSocket updates are rate-limited to one packet per 50 ms to avoid
+// flooding connected clients with too much data.
+//
+// Interesting reading:
+//   Finite state machines — https://en.wikipedia.org/wiki/Finite-state_machine
+//   Game loop pattern     — https://gameprogrammingpatterns.com/game-loop.html
 void processGameLogic() 
 {
     readInputs();
@@ -1111,6 +1333,21 @@ void processGameLogic()
 	}
 }
 
+// resetLevel() — wipe the slate and prepare for the next round.
+//
+// Called when:
+//   * The player presses RESTART  (fullReset = true  — also resets score and lives)
+//   * A level is cleared or skipped (fullReset = false — score and lives keep their values)
+//
+// It disables every enemy and every shot (setting active = false is faster and simpler
+// than actually deleting objects — this is the classic "object pool" pattern used in
+// most game engines to avoid slow dynamic memory allocation during gameplay).
+//
+// Enemy speed is recalculated from the base speed minus a fixed amount per level,
+// clamped to a minimum of 50 ms so the game stays physically winnable.
+//
+// Interesting reading:
+//   Object pool pattern — https://gameprogrammingpatterns.com/object-pool.html
 void resetLevel(bool fullReset) 
 {
     if (fullReset) 
@@ -1170,6 +1407,16 @@ void resetLevel(bool fullReset)
     updateWsLeds = true;
 }
 
+// showLevelIndicator() — paint the LED strip with a "level preview" display.
+//
+// The strip is divided into three sections:
+//   [0 … level-1]      — white (or orange on boss levels) dots, one per level reached.
+//   [level]            — a dark spacer.
+//   [level+1 … end-4]  — a rainbow animation (updated each frame in updateShowingLevelState).
+//   [end-3 … end-1]    — red, green, blue colour indicator dots.
+//
+// This gives the player an at-a-glance progress bar and a 3-second countdown before
+// the action starts.  Boss levels (every 3rd) glow orange as a warning.
 void showLevelIndicator() 
 {
     gameState = SHOWING_LEVEL;
@@ -1198,6 +1445,19 @@ void showLevelIndicator()
     showingLevelEnterTime = millis();
 }
 
+// updateShowingLevelState() — animate the SHOWING_LEVEL screen each frame.
+//
+// Two things happen here:
+//  1. Every 2–5 seconds (random interval) a random sound plays to keep the idle
+//     screen lively.
+//  2. Every 80 ms the rainbow section is redrawn with fill_rainbow() from FastLED,
+//     shifting the starting hue each frame to create scrolling motion.  fill_rainbow
+//     uses the HSV colour model — Hue, Saturation, Value — which wraps colours smoothly
+//     around a circle rather than jumping abruptly between R, G, B values.
+//
+// Interesting reading:
+//   HSV colour model      — https://en.wikipedia.org/wiki/HSL_and_HSV
+//   FastLED colour tricks — https://fastled.io/docs/group__colorutils.html
 void updateShowingLevelState()
 {
     unsigned long currentMillis = millis();
@@ -1242,6 +1502,24 @@ void updateShowingLevelState()
     }
 }
 
+// startGameRound() — spawn all enemies and officially begin a level.
+//
+// Enemies are placed in consecutive positions starting from the far end of the strip
+// (position activeLeds-1) so they march toward the player (position 0) over time.
+//
+// Each enemy is given a random colour (Red / Green / Blue) and a random *type*:
+//   Normal    — one matching hit kills it.
+//   Power-up  — killing it grants a super-shot charge for that colour.
+//   Armored   — first hit strips the grey armour; second (matching) hit kills it.
+//   Gold      — needs two *different* coloured hits within 2 seconds; worth 5× points.
+//   Bomb      — any hit explodes a 5-pixel radius; also explodes reaching the player.
+//   Boss      — appears every 3rd level; 3 matching hits to kill; worth triple points.
+//
+// The time limit shrinks by 1 second per level (from 45 s down to a minimum of 15 s),
+// rewarding fast players with a time bonus.
+//
+// Interesting reading:
+//   Enemy archetypes in game design — https://www.gamedeveloper.com/design/the-art-of-enemy-design
 void startGameRound() 
 {
     gameState = PLAYING;
@@ -1308,6 +1586,33 @@ void startGameRound()
     playSound("/power.wav");
 }
 
+// gameLoop() — ticks every frame while the game is in the PLAYING state.
+//
+// Seven mini-systems run in sequence each frame:
+//
+//  0a. Freeze power-up — if the player pressed all three buttons at once, all enemy
+//      movement halts for FREEZE_DURATION_MS.  Only usable once per level.
+//  0b. Gold enemy timeout — if a gold enemy's first-hit window expires before a second
+//      hit lands, the first-hit colour is cleared and the player must start again.
+//  0c. Speed ramp — every 10 s the enemy move interval shrinks by 5%, making the game
+//      get gradually harder the longer a level drags on.
+//  0d. Reinforcements — when ≤40% of the original enemies survive, a fresh wave of five
+//      spawns from the far end.  No position overlap is allowed (isPositionOccupied check).
+//  0e. Survival spawns — in endless mode a new enemy appears every 2.5 s.
+//
+//  1.  Shoot  — translate button inputs into new Projectile objects.
+//  2.  Move shots — advance each active shot one pixel per shotMoveInterval.
+//      The interval scales with strip length so longer strips don't feel sluggish.
+//  3.  Move enemies — advance each active enemy one pixel toward the player.
+//      If an enemy exits position 0, a life is lost.
+//  4.  Render — call drawGame() to paint the current frame to the LED strip.
+//
+// The timing of moves is controlled by comparing millis() (milliseconds since boot)
+// against the last-move timestamp.  This decouples game speed from loop speed — the
+// loop runs as fast as possible, but things only move when their time slice arrives.
+//
+// Interesting reading:
+//   Fixed timestep game loops — https://gameprogrammingpatterns.com/game-loop.html
 void gameLoop() 
 {
 	updateWsLeds = false;
@@ -1358,21 +1663,26 @@ void gameLoop()
         if (active > 0 && active <= (initialEnemyCount * REINFORCE_THRESHOLD / 100))
         {
             reinforcementSent = true;
-            int spawnPos = activeLeds - 1;
+            // Scan from the far end and skip positions already occupied
+            int nextReinforcePos = activeLeds - 1;
             for (int r = 0; r < REINFORCE_COUNT; r++)
             {
+                while (nextReinforcePos >= 0 && isPositionOccupied(nextReinforcePos))
+                    nextReinforcePos--;
+                if (nextReinforcePos < 0) break;
                 for (int j = 0; j < MAX_ENEMIES; j++)
                 {
                     if (!enemies[j].active)
                     {
                         enemies[j].active = true;
-                        enemies[j].position = spawnPos - r;
+                        enemies[j].position = nextReinforcePos;
                         enemies[j].color = getRandomColor();
                         enemies[j].isBoss = false; enemies[j].hitsLeft = 1;
                         enemies[j].isPowerUp = false; enemies[j].isGold = false;
                         enemies[j].isBomb = false; enemies[j].isArmored = false;
                         enemies[j].goldHit1Color = CRGB::Black;
                         enemies[j].goldHit1Time = 0;
+                        nextReinforcePos--;
                         break;
                     }
                 }
@@ -1385,23 +1695,30 @@ void gameLoop()
     {
         if (countActiveEnemies() < 15)
         {
-            for (int j = 0; j < MAX_ENEMIES; j++)
+            // Find the highest unoccupied position from the far end
+            int survivalSpawnPos = activeLeds - 1;
+            while (survivalSpawnPos >= 0 && isPositionOccupied(survivalSpawnPos))
+                survivalSpawnPos--;
+            if (survivalSpawnPos >= 0)
             {
-                if (!enemies[j].active)
+                for (int j = 0; j < MAX_ENEMIES; j++)
                 {
-                    enemies[j].active = true;
-                    enemies[j].position = activeLeds - 1;
-                    enemies[j].color = getRandomColor();
-                    enemies[j].isBoss = false; enemies[j].hitsLeft = 1;
-                    enemies[j].isPowerUp = (random(100) < 10);
-                    enemies[j].isGold = !enemies[j].isPowerUp && (random(100) < GOLD_ENEMY_CHANCE);
-                    if (enemies[j].isGold) enemies[j].color = CRGB(255, 180, 0);
-                    enemies[j].isBomb = !enemies[j].isPowerUp && !enemies[j].isGold && (random(100) < BOMB_ENEMY_CHANCE);
-                    if (enemies[j].isBomb) enemies[j].color = CRGB(180, 0, 180);
-                    enemies[j].isArmored = false;
-                    enemies[j].goldHit1Color = CRGB::Black;
-                    enemies[j].goldHit1Time = 0;
-                    break;
+                    if (!enemies[j].active)
+                    {
+                        enemies[j].active = true;
+                        enemies[j].position = survivalSpawnPos;
+                        enemies[j].color = getRandomColor();
+                        enemies[j].isBoss = false; enemies[j].hitsLeft = 1;
+                        enemies[j].isPowerUp = (random(100) < 10);
+                        enemies[j].isGold = !enemies[j].isPowerUp && (random(100) < GOLD_ENEMY_CHANCE);
+                        if (enemies[j].isGold) enemies[j].color = CRGB(255, 180, 0);
+                        enemies[j].isBomb = !enemies[j].isPowerUp && !enemies[j].isGold && (random(100) < BOMB_ENEMY_CHANCE);
+                        if (enemies[j].isBomb) enemies[j].color = CRGB(180, 0, 180);
+                        enemies[j].isArmored = false;
+                        enemies[j].goldHit1Color = CRGB::Black;
+                        enemies[j].goldHit1Time = 0;
+                        break;
+                    }
                 }
             }
         }
@@ -1510,6 +1827,30 @@ void gameLoop()
 }
 
 // === BUTTON INPUT LOGIC ===
+//
+// readInputs() — translate raw button states into high-level game events.
+//
+// This function runs every frame and manages three kinds of press:
+//
+//  SHORT press  — detected on button *release* if the button was held for less than
+//                 LONG_PRESS_MS.  Fires a normal single-hit shot.
+//
+//  LONG press   — detected while the button is *still held* and the hold duration
+//                 exceeds LONG_PRESS_MS.  Fires a super shot (if a power-up is charged).
+//                 A flag (handledX) prevents the press from firing twice.
+//
+//  FREEZE combo — if all three game buttons are held simultaneously, the freeze
+//                 power-up is triggered.  This is checked *before* the individual
+//                 button handlers so a simultaneous press doesn't accidentally fire
+//                 three shots at once.
+//
+// The ezButton library handles hardware debouncing — physical button contacts bounce
+// for a few milliseconds when pressed, generating a burst of false edges; ezButton
+// ignores edges that are too close together.
+//
+// Interesting reading:
+//   Button debouncing         — https://www.allaboutcircuits.com/technical-articles/how-to-debounce-a-switch/
+//   Pull-up resistors & INPUT — https://learn.sparkfun.com/tutorials/pull-up-resistors
 void readInputs() 
 {
     // Process ezButton state changes
@@ -1647,6 +1988,11 @@ void readInputs()
     }
 }
 
+// clearInputs() — reset all game-button flags to false after they've been processed.
+//
+// The inputs struct acts as a single-frame message box: a flag is set to true when an
+// event occurs, processed by the game in the same frame, then cleared here.  Not clearing
+// would cause the same input to trigger on every subsequent frame indefinitely.
 void clearInputs() 
 {
     inputs.redShort = false; 
@@ -1658,6 +2004,21 @@ void clearInputs()
     inputs.freeze = false;
 }
 
+// checkGlobalCollisions() — test every active shot against every active enemy.
+//
+// This is a classic O(n × m) collision check — for each of the MAX_SHOTS slots,
+// we compare its position against every one of the MAX_ENEMIES slots.
+// With small counts (≤20 shots, ≤100 enemies) it runs in microseconds.
+//
+// For larger games you'd use spatial partitioning (quad-trees, grids) to avoid
+// checking every pair, but here 20 × 100 = 2000 comparisons is negligible.
+//
+// Position equality (==) is exact because both shots and enemies sit on integer LED
+// indices with no sub-pixel precision — no floating-point headaches.
+//
+// Interesting reading:
+//   Collision detection fundamentals — https://developer.mozilla.org/en-US/docs/Games/Techniques/2D_collision_detection
+//   Spatial partitioning            — https://gameprogrammingpatterns.com/spatial-partition.html
 void checkGlobalCollisions() 
 {
 	// Run over all short
@@ -1691,6 +2052,34 @@ void checkGlobalCollisions()
     }
 }
 
+// handleCollision() — resolve what happens when a shot and an enemy occupy the same pixel.
+//
+// This is the richest function in the game; it implements five distinct outcomes:
+//
+//  1. ARMORED    — any shot strips the grey shell; the enemy survives but is now vulnerable.
+//
+//  2. GOLD       — two-hit mechanic:
+//                  * First hit records the shot colour and starts a 2-second timer.
+//                  * Second hit must be a *different* colour within the window → kill for 5× points.
+//                  * Wrong colour or timeout → penalty: 3 random enemies spawn, combo resets.
+//
+//  3. BOMB       — any hit triggers a chain explosion that destroys all enemies within ±5 pixels.
+//                  Score is awarded per enemy destroyed in the blast radius.
+//
+//  4. COLOUR MATCH — shot colour == enemy colour → enemy defeated.  If it's a boss, decrement
+//                  hitsLeft; kill only when it reaches zero.  Power-up enemies grant a charge.
+//                  Super shots chain to additional front-of-queue enemies of the same colour.
+//
+//  5. MISMATCH  — shot colour ≠ enemy colour → penalty.  The enemy *splits*, spawning a copy
+//                  of itself adjacent (in a free position); enemies get faster; combo breaks.
+//
+// The defeatEnemy lambda is an inline helper that handles the shared bookkeeping of killing an
+// enemy (score, combo, hit effect, power-up grants) to avoid copy-pasting it
+// for normal kills and for super-shot chain kills.
+//
+// Interesting reading:
+//   Game mechanics design  — https://www.gamedeveloper.com/design/designing-game-mechanics
+//   Lambda functions in C++ — https://en.cppreference.com/w/cpp/language/lambda
 void handleCollision(int shotIdx, int enemyIdx) 
 {
     // Armored enemies: any shot strips armor first. No penalty; shot consumed.
@@ -1979,6 +2368,20 @@ void handleCollision(int shotIdx, int enemyIdx)
     }
 }
 
+// triggerShoot() — create a new projectile and send it flying toward the enemies.
+//
+// Projectiles are stored in a fixed-size array of MAX_SHOTS (20) slots — the
+// "object pool" pattern again, avoiding heap allocation at runtime.
+// If all 20 slots are occupied the shot is silently dropped; an unlikely edge case.
+//
+// Normal shot  (attemptSuper = false) — colour matches the button pressed; hitsLeft = 1.
+//
+// Super shot   (attemptSuper = true, power-up held) — fires a beam that can chain
+//              through 2–5 enemies of the same colour.  Uses up the stored power-up.
+//              If the player attempts a super shot without a charge, a normal shot fires.
+//
+// CRGB colours are compared by value.  CRGB::Red == {255, 0, 0}, and FastLED's ==
+// operator compares all three channels, so this "just works" without special enums.
 void triggerShoot(CRGB color, bool attemptSuper) 
 {
     int freeSlot = -1;
@@ -2053,8 +2456,20 @@ void triggerShoot(CRGB color, bool attemptSuper)
     }
 }
 
-// === NEW ENEMY GENERATION LOGIC ===
+// === ENEMY GENERATION HELPERS ===
 
+// getRandomColor() — return Red, Green, or Blue with equal probability.
+//
+// Uses Arduino's random() which produces a pseudorandom integer.  The underlying
+// algorithm is a linear congruential generator (LCG) — fast and simple, though not
+// cryptographically secure (not that we need that for a game!).
+// The ESP32's boot ROM seeds the RNG from hardware noise on first use.
+//
+// Only three pure colours are used so the player always has exactly a 1-in-3 chance
+// of guessing the right button without looking — fair and consistent.
+//
+// Interesting reading:
+//   Linear congruential generator — https://en.wikipedia.org/wiki/Linear_congruential_generator
 CRGB getRandomColor() 
 {
     // Otherwise, generate a completely random color
@@ -2078,6 +2493,36 @@ CRGB getRandomColor()
 }
 
 // === DRAWING LOGIC ===
+//
+// drawGame() — render the entire game state to the LED strip each frame.
+//
+// FastLED's programming model is dead simple: fill the leds[] array with CRGB colour
+// values, then call show() to push it to the hardware.  There's no "draw call" API;
+// you just set array elements and show the result.
+//
+// Layers are painted in order — earlier layers can be overwritten.  The += operator
+// additively blends (like overlapping coloured torches) while = replaces outright.
+//
+//  Layer 0 — Time bar: 0-to-4 dim pixels at the player end show time remaining.
+//  Layer 1 — Charge animation: a growing glow at position 0 while a button is held.
+//  Layer 2 — Enemies with type-specific rendering:
+//            * Boss        — pulsing white core + coloured glow on neighbours.
+//            * Gold        — amber, flashes faster after first hit lands.
+//            * Bomb        — pulsing magenta + glow.
+//            * Armored     — grey with a faint colour hint underneath.
+//            * Power-up    — pulsing at a hardcoded brightness sequence.
+//            * Normal      — solid colour.
+//  Layer 3 — Shots: a coloured dot with a fading tail (18 pixels for super shots).
+//  Layer 4 — Hit effect: a brief expanding flash at the collision point.
+//  Layer 5 — Danger zone: additive red pulse on the first 5 LEDs when an enemy is close.
+//  Layer 6 — Freeze overlay: a low-level blue tint while enemies are frozen.
+//
+// All enemies are now drawn in *reverse* index order so the lowest-index enemy
+// (the one that collision logic targets first) paints on top and is always visible.
+//
+// Interesting reading:
+//   WS2812B LED strip protocol — https://wp.josh.com/2014/05/13/ws2812-neopixels-are-not-so-bitmask-addressable/
+//   FastLED colour mixing      — https://fastled.io/docs/group__colorutils.html
 void drawGame() 
 {
     FastLED.clear();
@@ -2144,7 +2589,9 @@ void drawGame()
     }
 
     // 2. Draw Enemies
-    for (int i = 0; i < MAX_ENEMIES; i++) 
+    // Iterate in reverse so that the lowest-index enemy (which collision logic hits first)
+    // is painted last and therefore visible when multiple enemies share a pixel.
+    for (int i = MAX_ENEMIES - 1; i >= 0; i--) 
     {
         if (enemies[i].active) 
         {
@@ -2320,6 +2767,17 @@ void drawGame()
 }
 
 // ================= WEB SERVER & SOCKETS =================
+//
+// setupWiFi() — start a Wi-Fi Access Point (hotspot) on the ESP32.
+//
+// In AP mode the ESP32 itself creates the wireless network — no router needed.
+// Any phone or laptop can connect to "LED_BLASTER" and then browse to 192.168.4.1
+// to reach the game's web UI.  The IP address is assigned automatically by the ESP32's
+// built-in DHCP server.
+//
+// Interesting reading:
+//   Wi-Fi modes (STA vs AP)     — https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-guides/wifi.html
+//   DHCP explained simply       — https://www.howtogeek.com/680740/what-is-dhcp/
 void setupWiFi() 
 {
     WiFi.softAP(ssid, password);
@@ -2327,6 +2785,21 @@ void setupWiFi()
     Serial.println(WiFi.softAPIP());
 }
 
+// onWsEvent() — callback fired whenever a WebSocket event occurs.
+//
+// WebSockets are a browser technology that keeps a persistent two-way connection open
+// between the web page and the server (the ESP32 here), so the page can send button
+// presses instantly and receive LED updates without polling.
+//
+// Recognised text messages map directly to the same inputs struct used by the physical
+// buttons — the physical buttons and the web UI are perfectly interchangeable.
+//
+// On WS_EVT_CONNECT (a client just connected) we immediately send current game state
+// so the web page isn't blank while it waits for the next periodic update.
+//
+// Interesting reading:
+//   WebSockets explained — https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API
+//   ESPAsyncWebServer    — https://github.com/me-no-dev/ESPAsyncWebServer
 void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) 
 {
     if (type == WS_EVT_DATA) 
@@ -2388,6 +2861,12 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
     }
 }
 
+// setupWebRoutes() — register all HTTP URL handlers and start the web server.
+//
+// The ESPAsyncWebServer library lets us serve files directly from SPIFFS, so the
+// game's web UI (HTML/CSS/JS in /data/index.html) loads as a normal webpage.
+// Only one route is needed: GET / → serve index.html.  Everything else flows over
+// the WebSocket connection once the page is loaded.
 void setupWebRoutes() 
 {
     ws.onEvent(onWsEvent);
@@ -2401,6 +2880,14 @@ void setupWebRoutes()
     server.begin();
 }
 
+// notifyClients() — broadcast current game state to every connected browser.
+//
+// Serialises a compact JSON object containing score, level, combo, lives, power-ups,
+// accuracy, active-LED count, time remaining, and survival/high-score values.
+// JSON is used because JavaScript in the browser can parse it trivially with JSON.parse().
+//
+// ws.textAll() sends the string to every connected WebSocket client at once — handy if
+// multiple phones are watching the same game simultaneously.
 void notifyClients() 
 {
     int timePct = 0;
@@ -2434,6 +2921,15 @@ void notifyClients()
     ws.textAll(output);
 }
 
+// sendLedState() — push the raw pixel colour data to every browser as a binary WebSocket frame.
+//
+// JSON is too verbose for 300 pixels × 3 bytes (R,G,B) = 900 bytes per frame at up to
+// 20 fps.  Instead we send a raw binary buffer: byte 0 = R of pixel 0, byte 1 = G of
+// pixel 0, byte 2 = B of pixel 0, byte 3 = R of pixel 1 … and so on.
+// The browser unpacks this with a Uint8Array and draws the pixels on a <canvas> element.
+//
+// The buffer is declared static so it lives in RAM permanently (no re-allocation each call)
+// and is sized for the maximum possible strip (NUM_LEDS * 3 = 900 bytes).
 void sendLedState() 
 {
     // Static buffer sized for the maximum strip (900 bytes). Only send activeLeds worth.
@@ -2447,6 +2943,31 @@ void sendLedState()
     ws.binaryAll(buffer, activeLeds * 3);
 }
 
+// isPositionOccupied() — return true if any active enemy already sits at this LED position.
+//
+// Used whenever new enemies are about to spawn to guarantee that no two enemies ever
+// share the same pixel.  Without this check, two enemies overlapping at one position
+// would cause a colour mismatch: the player sees one colour drawn on top but shooting
+// it hits the *other* enemy underneath — a very confusing bug!
+bool isPositionOccupied(int pos)
+{
+    for (int i = 0; i < MAX_ENEMIES; i++)
+    {
+        if (enemies[i].active && enemies[i].position == pos) return true;
+    }
+    return false;
+}
+
+// addEnemyAtFront() — spawn a penalty or split enemy as close to the requested position
+//                     as possible without overlapping any existing enemy.
+//
+// Called when:
+//   * A colour mismatch occurs — a copy of the hit enemy spawns adjacent to it.
+//   * A gold enemy penalty fires — 3 enemies spawn at the far end.
+//
+// Position search strategy: try toward the far end first (pos → activeLeds-1) so
+// spawned enemies don't crowd the player; if the far side is full, fall back toward
+// the player end (pos-1 → 0).  If every slot is occupied the spawn is skipped.
 void addEnemyAtFront(int pos, CRGB col) 
 {
     if (pos < 0 || pos >= activeLeds)
@@ -2454,12 +2975,27 @@ void addEnemyAtFront(int pos, CRGB col)
         return;
     }
 
+    // Find a free position: search toward the far end first, then toward the player end
+    int freePos = -1;
+    for (int p = pos; p < activeLeds; p++)
+    {
+        if (!isPositionOccupied(p)) { freePos = p; break; }
+    }
+    if (freePos < 0)
+    {
+        for (int p = pos - 1; p >= 0; p--)
+        {
+            if (!isPositionOccupied(p)) { freePos = p; break; }
+        }
+    }
+    if (freePos < 0) return; // No free position available
+
     for (int i = 0; i < MAX_ENEMIES; i++) 
     {
         if (!enemies[i].active) 
         {
             enemies[i].active = true; 
-            enemies[i].position = pos;
+            enemies[i].position = freePos;
             enemies[i].color = col; 
             enemies[i].isPowerUp = false;
             enemies[i].isBoss = false;
@@ -2474,6 +3010,17 @@ void addEnemyAtFront(int pos, CRGB col)
     }
 }
 
+// loseLife() — handle an enemy reaching the player's end of the strip.
+//
+// Steps:
+//  1. Decrement lives and break the combo.
+//  2. If lives reach 0 → GAME_OVER; save the high score.
+//  3. Otherwise, *repack* surviving enemies tightly from the far end.
+//     This gives the player a moment to breathe and resets positions to the same
+//     layout as the initial spawn, making the game fair rather than punishing a
+//     near-miss with an instantly adjacent enemy.
+//  4. Clear all in-flight shots (they'd wrongly fly into the reformed lineup).
+//  5. Reset enemy speed to the level's starting value (cancel any speed-ramp penalty).
 void loseLife()
 {
     lives--;
@@ -2520,6 +3067,11 @@ void loseLife()
     updateWsLeds = true;
 }
 
+// countActiveEnemies() — return how many enemies are currently alive.
+//
+// A simple linear scan of the enemies[] object-pool array.  Called to detect level
+// completion (count == 0), to decide whether to send reinforcements, and to cap
+// survival-mode enemy population.
 int countActiveEnemies() 
 {
     int count = 0;
@@ -2533,6 +3085,11 @@ int countActiveEnemies()
     return count;
 }
 
+// findFrontEnemyIndex() — find the enemy that is closest to the player (lowest position value).
+//
+// Used by the super-shot chain mechanic: after killing the directly-hit enemy, the shot
+// looks for the next closest enemy and tries to hit that too, chaining up to hitsLeft times.
+// Returns -1 if no enemies are active.
 int findFrontEnemyIndex()
 {
     int frontIdx = -1;
